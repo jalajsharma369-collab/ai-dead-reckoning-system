@@ -7,9 +7,9 @@ import os
 from PIL import Image, ExifTags
 
 
-# -----------------------------
+# =========================================================
 # PAGE SETTINGS
-# -----------------------------
+# =========================================================
 
 st.set_page_config(
     page_title="Intelligent Dead Reckoning",
@@ -18,9 +18,9 @@ st.set_page_config(
 )
 
 
-# -----------------------------
+# =========================================================
 # TITLE
-# -----------------------------
+# =========================================================
 
 st.title("🛰️ AI-ML Based Intelligent Dead Reckoning System")
 
@@ -29,21 +29,36 @@ st.write(
 )
 
 
-# -----------------------------
-# IMAGE BASED LOCATION
-# -----------------------------
+# =========================================================
+# LOAD CSV DATA
+# =========================================================
 
-st.subheader("📷 Image-Based Location")
+try:
 
-st.write(
-    "Upload a photo containing GPS metadata to extract its location."
-)
+    app_folder = os.path.dirname(os.path.abspath(__file__))
 
-uploaded_image = st.file_uploader(
-    "Upload an image",
-    type=["jpg", "jpeg", "png"]
-)
+    csv_path = os.path.join(
+        app_folder,
+        "sensor_data.csv"
+    )
 
+    data = pd.read_csv(csv_path)
+
+    st.success("✅ Sensor data loaded successfully!")
+
+except FileNotFoundError:
+
+    st.error(
+        "❌ sensor_data.csv not found. "
+        "Please keep sensor_data.csv inside the project folder."
+    )
+
+    st.stop()
+
+
+# =========================================================
+# IMAGE GPS METADATA FUNCTION
+# =========================================================
 
 def get_gps_from_image(uploaded_file):
 
@@ -72,7 +87,7 @@ def get_gps_from_image(uploaded_file):
         longitude = gps.get("GPSLongitude")
         longitude_ref = gps.get("GPSLongitudeRef")
 
-        if not latitude or not longitude:
+        if latitude is None or longitude is None:
             return None
 
         def convert_to_decimal(value, ref):
@@ -92,107 +107,139 @@ def get_gps_from_image(uploaded_file):
 
             return decimal
 
-        lat = convert_to_decimal(
+        latitude_decimal = convert_to_decimal(
             latitude,
             latitude_ref
         )
 
-        lon = convert_to_decimal(
+        longitude_decimal = convert_to_decimal(
             longitude,
             longitude_ref
         )
 
-        return lat, lon
+        return latitude_decimal, longitude_decimal
 
     except Exception:
 
         return None
 
 
-if uploaded_image:
+# =========================================================
+# IMAGE BASED LOCATION
+# =========================================================
 
+st.subheader("📷 Image-Based Location")
+
+st.write(
+    "Upload a photo to extract its GPS location. "
+    "If GPS metadata is unavailable, the system uses "
+    "the latest available sensor/GPS location as fallback."
+)
+
+
+uploaded_image = st.file_uploader(
+    "Upload an image",
+    type=["jpg", "jpeg", "png"]
+)
+
+
+if uploaded_image is not None:
+
+    # Show uploaded image
     st.image(
         uploaded_image,
         caption="Uploaded Image",
         use_container_width=True
     )
 
+    # Try to extract GPS from image
     location = get_gps_from_image(uploaded_image)
 
     if location:
 
+        # -------------------------------------------------
+        # PHOTO GPS AVAILABLE
+        # -------------------------------------------------
+
         image_latitude, image_longitude = location
 
-        st.success("📍 GPS location found in image!")
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-
-            st.metric(
-                "Image Latitude",
-                f"{image_latitude:.6f}"
-            )
-
-        with col2:
-
-            st.metric(
-                "Image Longitude",
-                f"{image_longitude:.6f}"
-            )
-
-        image_map = pd.DataFrame(
-            {
-                "lat": [image_latitude],
-                "lon": [image_longitude]
-            }
+        st.success(
+            "📍 GPS location found in image!"
         )
 
-        st.map(image_map)
+        location_source = "Image GPS Metadata"
 
     else:
 
+        # -------------------------------------------------
+        # FALLBACK TO SENSOR DATA
+        # -------------------------------------------------
+
+        image_latitude = float(
+            data["latitude"].iloc[-1]
+        )
+
+        image_longitude = float(
+            data["longitude"].iloc[-1]
+        )
+
         st.warning(
-            "⚠️ No GPS location metadata was found in this image."
+            "⚠️ Image GPS metadata not found."
         )
 
         st.info(
-            "Try uploading an original photo taken with a phone "
-            "camera that has location services enabled."
+            "📍 Using latest available sensor/GPS "
+            "location as fallback."
         )
 
+        location_source = "Sensor Data Fallback"
 
-# -----------------------------
-# LOAD CSV DATA
-# -----------------------------
+    # -----------------------------------------------------
+    # DISPLAY LOCATION
+    # -----------------------------------------------------
 
-try:
+    st.subheader("📍 Detected Location")
 
-    # Find sensor_data.csv in the same folder as app.py
-    app_folder = os.path.dirname(os.path.abspath(__file__))
+    col1, col2, col3 = st.columns(3)
 
-    csv_path = os.path.join(
-        app_folder,
-        "sensor_data.csv"
+    with col1:
+
+        st.metric(
+            "Latitude",
+            f"{image_latitude:.6f}"
+        )
+
+    with col2:
+
+        st.metric(
+            "Longitude",
+            f"{image_longitude:.6f}"
+        )
+
+    with col3:
+
+        st.metric(
+            "Location Source",
+            location_source
+        )
+
+    # -----------------------------------------------------
+    # LOCATION MAP
+    # -----------------------------------------------------
+
+    image_map = pd.DataFrame(
+        {
+            "lat": [image_latitude],
+            "lon": [image_longitude]
+        }
     )
 
-    data = pd.read_csv(csv_path)
-
-    st.success("✅ Sensor data loaded successfully!")
-
-except FileNotFoundError:
-
-    st.error(
-        "❌ sensor_data.csv not found. "
-        "Please keep sensor_data.csv inside the project folder."
-    )
-
-    st.stop()
+    st.map(image_map)
 
 
-# -----------------------------
-# SHOW DATA
-# -----------------------------
+# =========================================================
+# SHOW SENSOR DATA
+# =========================================================
 
 st.subheader("📊 Sensor Data")
 
@@ -202,9 +249,9 @@ st.dataframe(
 )
 
 
-# -----------------------------
+# =========================================================
 # CALCULATE HEADING
-# -----------------------------
+# =========================================================
 
 def calculate_heading(mx, my):
 
@@ -227,9 +274,9 @@ data["heading"] = data.apply(
 )
 
 
-# -----------------------------
-# CURRENT VALUES
-# -----------------------------
+# =========================================================
+# CURRENT NAVIGATION VALUES
+# =========================================================
 
 latest = data.iloc[-1]
 
@@ -266,13 +313,14 @@ with col4:
     )
 
 
-# -----------------------------
-# SENSOR INFORMATION
-# -----------------------------
+# =========================================================
+# IMU SENSOR INFORMATION
+# =========================================================
 
 st.subheader("📱 IMU Sensor Information")
 
 col1, col2, col3 = st.columns(3)
+
 
 with col1:
 
@@ -282,6 +330,7 @@ with col1:
     st.write("Y:", latest["acc_y"])
     st.write("Z:", latest["acc_z"])
 
+
 with col2:
 
     st.write("### 🔄 Gyroscope")
@@ -289,6 +338,7 @@ with col2:
     st.write("X:", latest["gyro_x"])
     st.write("Y:", latest["gyro_y"])
     st.write("Z:", latest["gyro_z"])
+
 
 with col3:
 
@@ -299,13 +349,14 @@ with col3:
     st.write("Z:", latest["mag_z"])
 
 
-# -----------------------------
+# =========================================================
 # GPS PATH
-# -----------------------------
+# =========================================================
 
 st.subheader("🗺️ GPS Navigation Path")
 
 fig = go.Figure()
+
 
 fig.add_trace(
     go.Scattermap(
@@ -315,6 +366,7 @@ fig.add_trace(
         name="GPS Path"
     )
 )
+
 
 fig.update_layout(
 
@@ -339,15 +391,16 @@ fig.update_layout(
     )
 )
 
+
 st.plotly_chart(
     fig,
     use_container_width=True
 )
 
 
-# -----------------------------
-# GPS OUTAGE
-# -----------------------------
+# =========================================================
+# GPS OUTAGE SIMULATION
+# =========================================================
 
 st.subheader("🚨 GPS Outage Simulation")
 
@@ -358,9 +411,9 @@ st.info(
 )
 
 
-# -----------------------------
+# =========================================================
 # FOOTER
-# -----------------------------
+# =========================================================
 
 st.markdown("---")
 
