@@ -5,6 +5,7 @@ import math
 import os
 
 from PIL import Image, ExifTags
+from geopy.geocoders import Nominatim
 
 
 # =========================================================
@@ -30,7 +31,7 @@ st.write(
 
 
 # =========================================================
-# LOAD CSV DATA
+# LOAD SENSOR CSV
 # =========================================================
 
 try:
@@ -107,17 +108,77 @@ def get_gps_from_image(uploaded_file):
 
             return decimal
 
-        latitude_decimal = convert_to_decimal(
+        lat = convert_to_decimal(
             latitude,
             latitude_ref
         )
 
-        longitude_decimal = convert_to_decimal(
+        lon = convert_to_decimal(
             longitude,
             longitude_ref
         )
 
-        return latitude_decimal, longitude_decimal
+        return lat, lon
+
+    except Exception:
+
+        return None
+
+
+# =========================================================
+# REVERSE GEOCODING
+# =========================================================
+
+def get_place_name(latitude, longitude):
+
+    try:
+
+        geolocator = Nominatim(
+            user_agent="sih_intelligent_dead_reckoning"
+        )
+
+        location = geolocator.reverse(
+            f"{latitude}, {longitude}",
+            language="en",
+            addressdetails=True,
+            zoom=18,
+            timeout=10
+        )
+
+        if location is None:
+            return None
+
+        address = location.raw.get("address", {})
+
+        # Try to get the most useful locality
+        locality = (
+            address.get("suburb")
+            or address.get("neighbourhood")
+            or address.get("quarter")
+            or address.get("residential")
+            or address.get("village")
+            or address.get("town")
+            or address.get("city")
+        )
+
+        city = (
+            address.get("city")
+            or address.get("town")
+            or address.get("municipality")
+            or address.get("village")
+        )
+
+        state = address.get("state")
+
+        country = address.get("country")
+
+        return {
+            "locality": locality,
+            "city": city,
+            "state": state,
+            "country": country,
+            "full_address": location.address
+        }
 
     except Exception:
 
@@ -131,9 +192,9 @@ def get_gps_from_image(uploaded_file):
 st.subheader("📷 Image-Based Location")
 
 st.write(
-    "Upload a photo to extract its GPS location. "
-    "If GPS metadata is unavailable, the system uses "
-    "the latest available sensor/GPS location as fallback."
+    "Upload an original camera photo. "
+    "The system first checks GPS metadata and then "
+    "converts coordinates into a readable place name."
 )
 
 
@@ -145,35 +206,43 @@ uploaded_image = st.file_uploader(
 
 if uploaded_image is not None:
 
-    # Show uploaded image
+    # -----------------------------------------------------
+    # SHOW IMAGE
+    # -----------------------------------------------------
+
     st.image(
         uploaded_image,
         caption="Uploaded Image",
         use_container_width=True
     )
 
-    # Try to extract GPS from image
-    location = get_gps_from_image(uploaded_image)
+    # -----------------------------------------------------
+    # GET GPS FROM IMAGE
+    # -----------------------------------------------------
+
+    location = get_gps_from_image(
+        uploaded_image
+    )
 
     if location:
 
-        # -------------------------------------------------
-        # PHOTO GPS AVAILABLE
-        # -------------------------------------------------
+        # =================================================
+        # IMAGE GPS FOUND
+        # =================================================
 
         image_latitude, image_longitude = location
 
-        st.success(
-            "📍 GPS location found in image!"
-        )
-
         location_source = "Image GPS Metadata"
+
+        st.success(
+            "📍 GPS metadata successfully detected!"
+        )
 
     else:
 
-        # -------------------------------------------------
+        # =================================================
         # FALLBACK TO SENSOR DATA
-        # -------------------------------------------------
+        # =================================================
 
         image_latitude = float(
             data["latitude"].iloc[-1]
@@ -182,6 +251,8 @@ if uploaded_image is not None:
         image_longitude = float(
             data["longitude"].iloc[-1]
         )
+
+        location_source = "Sensor Data Fallback"
 
         st.warning(
             "⚠️ Image GPS metadata not found."
@@ -192,15 +263,22 @@ if uploaded_image is not None:
             "location as fallback."
         )
 
-        location_source = "Sensor Data Fallback"
+    # -----------------------------------------------------
+    # REVERSE GEOCODING
+    # -----------------------------------------------------
+
+    place = get_place_name(
+        image_latitude,
+        image_longitude
+    )
 
     # -----------------------------------------------------
-    # DISPLAY LOCATION
+    # DETECTED LOCATION
     # -----------------------------------------------------
 
     st.subheader("📍 Detected Location")
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
 
     with col1:
 
@@ -216,16 +294,60 @@ if uploaded_image is not None:
             f"{image_longitude:.6f}"
         )
 
-    with col3:
+    # -----------------------------------------------------
+    # PLACE NAME
+    # -----------------------------------------------------
 
-        st.metric(
-            "Location Source",
-            location_source
+    if place:
+
+        locality = place.get("locality")
+        city = place.get("city")
+        state = place.get("state")
+        country = place.get("country")
+
+        if locality:
+
+            st.success(
+                f"📍 Place: {locality}"
+            )
+
+        elif city:
+
+            st.success(
+                f"📍 Place: {city}"
+            )
+
+        if city:
+            st.write(f"🏙️ **City:** {city}")
+
+        if state:
+            st.write(f"🗺️ **State:** {state}")
+
+        if country:
+            st.write(f"🌍 **Country:** {country}")
+
+        st.caption(
+            f"📌 Location Source: {location_source}"
+        )
+
+        with st.expander("View full address"):
+
+            st.write(
+                place["full_address"]
+            )
+
+    else:
+
+        st.info(
+            "📍 Coordinates found, but place name "
+            "could not be retrieved."
         )
 
     # -----------------------------------------------------
-    # LOCATION MAP
+    # MAP
     # -----------------------------------------------------
+
+    st.subheader("🗺️ Location Map")
 
     image_map = pd.DataFrame(
         {
@@ -234,11 +356,16 @@ if uploaded_image is not None:
         }
     )
 
-    st.map(image_map)
+    st.map(
+        image_map,
+        latitude="lat",
+        longitude="lon",
+        zoom=15
+    )
 
 
 # =========================================================
-# SHOW SENSOR DATA
+# SENSOR DATA
 # =========================================================
 
 st.subheader("📊 Sensor Data")
@@ -275,7 +402,7 @@ data["heading"] = data.apply(
 
 
 # =========================================================
-# CURRENT NAVIGATION VALUES
+# CURRENT NAVIGATION STATUS
 # =========================================================
 
 latest = data.iloc[-1]
@@ -350,7 +477,7 @@ with col3:
 
 
 # =========================================================
-# GPS PATH
+# GPS NAVIGATION PATH
 # =========================================================
 
 st.subheader("🗺️ GPS Navigation Path")
@@ -418,5 +545,5 @@ st.info(
 st.markdown("---")
 
 st.caption(
-    "SIH Prototype | Python | Streamlit | Pandas | Plotly"
+    "SIH Prototype | Python | Streamlit | Pandas | Plotly | GeoPy"
 )
