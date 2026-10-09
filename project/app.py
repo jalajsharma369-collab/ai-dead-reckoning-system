@@ -1,549 +1,473 @@
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
-import math
-import os
-
+import numpy as np
+import folium
+from streamlit_folium import st_folium
 from PIL import Image, ExifTags
 from geopy.geocoders import Nominatim
-
-
-# =========================================================
-# PAGE SETTINGS
-# =========================================================
+from geopy.extra.rate_limiter import RateLimiter
+import io
+import math
 
 st.set_page_config(
-    page_title="Intelligent Dead Reckoning",
+    page_title="NAVI-DR | Intelligent Navigation",
     page_icon="🛰️",
     layout="wide"
 )
 
-
-# =========================================================
-# TITLE
-# =========================================================
-
-st.title("🛰️ AI-ML Based Intelligent Dead Reckoning System")
-
-st.write(
-    "Seamless Navigation Prototype using GPS and IMU Sensor Data"
-)
+st.title("🛰️ NAVI-DR")
+st.caption("AI-ML Based Intelligent Dead Reckoning System")
+st.subheader("📍 Image GPS Metadata & Location Tracking")
 
 
-# =========================================================
-# LOAD SENSOR CSV
-# =========================================================
-
-try:
-
-    app_folder = os.path.dirname(os.path.abspath(__file__))
-
-    csv_path = os.path.join(
-        app_folder,
-        "sensor_data.csv"
-    )
-
-    data = pd.read_csv(csv_path)
-
-    st.success("✅ Sensor data loaded successfully!")
-
-except FileNotFoundError:
-
-    st.error(
-        "❌ sensor_data.csv not found. "
-        "Please keep sensor_data.csv inside the project folder."
-    )
-
-    st.stop()
-
-
-# =========================================================
-# IMAGE GPS METADATA FUNCTION
-# =========================================================
-
-def get_gps_from_image(uploaded_file):
-
+# -----------------------------
+# Load sensor data
+# -----------------------------
+@st.cache_data
+def load_sensor_data():
     try:
+        df = pd.read_csv("sensor_data.csv")
+        df.columns = df.columns.str.strip().str.lower()
+        return df
+    except FileNotFoundError:
+        return pd.DataFrame()
 
-        image = Image.open(uploaded_file)
 
+data = load_sensor_data()
+
+if data.empty:
+    st.warning(
+        "sensor_data.csv was not found or contains no data. "
+        "Add it to the same repository as app.py."
+    )
+
+
+# -----------------------------
+# EXIF GPS extraction
+# -----------------------------
+def rational_to_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return float(value.numerator) / float(value.denominator)
+
+
+def dms_to_decimal(dms, ref):
+    degrees = rational_to_float(dms[0])
+    minutes = rational_to_float(dms[1])
+    seconds = rational_to_float(dms[2])
+
+    result = degrees + minutes / 60 + seconds / 3600
+
+    if ref in ("S", "W", b"S", b"W"):
+        result = -result
+
+    return result
+
+
+def get_image_gps(uploaded_image):
+    try:
+        image = Image.open(io.BytesIO(uploaded_image.getvalue()))
         exif = image.getexif()
 
         if not exif:
             return None
 
-        gps_ifd = exif.get_ifd(ExifTags.IFD.GPSInfo)
+        gps_info = exif.get_ifd(ExifTags.IFD.GPSInfo)
 
-        if not gps_ifd:
+        if not gps_info:
             return None
 
-        gps = {
+        gps_names = {
             ExifTags.GPSTAGS.get(key, key): value
-            for key, value in gps_ifd.items()
+            for key, value in gps_info.items()
         }
 
-        latitude = gps.get("GPSLatitude")
-        latitude_ref = gps.get("GPSLatitudeRef")
+        lat = gps_names.get("GPSLatitude")
+        lat_ref = gps_names.get("GPSLatitudeRef")
+        lon = gps_names.get("GPSLongitude")
+        lon_ref = gps_names.get("GPSLongitudeRef")
 
-        longitude = gps.get("GPSLongitude")
-        longitude_ref = gps.get("GPSLongitudeRef")
-
-        if latitude is None or longitude is None:
+        if lat is None or lon is None or lat_ref is None or lon_ref is None:
             return None
 
-        def convert_to_decimal(value, ref):
+        latitude = dms_to_decimal(lat, lat_ref)
+        longitude = dms_to_decimal(lon, lon_ref)
 
-            degrees = float(value[0])
-            minutes = float(value[1])
-            seconds = float(value[2])
+        if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+            return None
 
-            decimal = (
-                degrees
-                + minutes / 60
-                + seconds / 3600
-            )
-
-            if ref in ["S", "W"]:
-                decimal = -decimal
-
-            return decimal
-
-        lat = convert_to_decimal(
-            latitude,
-            latitude_ref
-        )
-
-        lon = convert_to_decimal(
-            longitude,
-            longitude_ref
-        )
-
-        return lat, lon
+        return latitude, longitude
 
     except Exception:
-
         return None
 
 
-# =========================================================
-# REVERSE GEOCODING
-# =========================================================
-
-def get_place_name(latitude, longitude):
-
+# -----------------------------
+# Reverse geocoding
+# -----------------------------
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_address(latitude, longitude):
     try:
-
         geolocator = Nominatim(
-            user_agent="sih_intelligent_dead_reckoning"
+            user_agent="NAVI-DR-Student-Project"
         )
 
-        location = geolocator.reverse(
-            f"{latitude}, {longitude}",
+        reverse = RateLimiter(
+            geolocator.reverse,
+            min_delay_seconds=1,
+            max_retries=1,
+            error_wait_seconds=1
+        )
+
+        result = reverse(
+            (latitude, longitude),
             language="en",
-            addressdetails=True,
-            zoom=18,
-            timeout=10
+            exactly_one=True,
+            timeout=8
         )
 
-        if location is None:
-            return None
+        if result:
+            return result.address, result.raw.get("address", {})
 
-        address = location.raw.get("address", {})
+    except Exception:
+        pass
 
-        # Try to get the most useful locality
-        locality = (
-            address.get("suburb")
-            or address.get("neighbourhood")
-            or address.get("quarter")
-            or address.get("residential")
-            or address.get("village")
-            or address.get("town")
-            or address.get("city")
+    return None, {}
+
+
+# -----------------------------
+# Upload image
+# -----------------------------
+uploaded_file = st.file_uploader(
+    "Upload an original photo containing GPS metadata",
+    type=["jpg", "jpeg", "tif", "tiff"]
+)
+
+latitude = None
+longitude = None
+location_source = None
+
+if uploaded_file is not None:
+    st.image(
+        uploaded_file,
+        caption="Uploaded image",
+        width=300
+    )
+
+    image_gps = get_image_gps(uploaded_file)
+
+    if image_gps:
+        latitude, longitude = image_gps
+        location_source = "Image GPS metadata"
+        st.success("GPS metadata found in the image!")
+
+    else:
+        st.warning("Image GPS metadata not found.")
+
+        if (
+            not data.empty
+            and "latitude" in data.columns
+            and "longitude" in data.columns
+        ):
+            gps_data = data.copy()
+
+            gps_data["latitude"] = pd.to_numeric(
+                gps_data["latitude"], errors="coerce"
+            )
+            gps_data["longitude"] = pd.to_numeric(
+                gps_data["longitude"], errors="coerce"
+            )
+
+            gps_data = gps_data.dropna(
+                subset=["latitude", "longitude"]
+            )
+
+            gps_data = gps_data[
+                gps_data["latitude"].between(-90, 90)
+                & gps_data["longitude"].between(-180, 180)
+                & (
+                    (gps_data["latitude"] != 0)
+                    | (gps_data["longitude"] != 0)
+                )
+            ]
+
+            if not gps_data.empty:
+                latest = gps_data.iloc[-1]
+                latitude = float(latest["latitude"])
+                longitude = float(latest["longitude"])
+                location_source = "Latest valid sensor/GPS CSV coordinates"
+
+                st.info(
+                    "Using the latest valid location from sensor_data.csv. "
+                    "This may not be where the photo was taken."
+                )
+
+            else:
+                st.error("No valid GPS coordinates found in the CSV.")
+
+        else:
+            st.error(
+                "Latitude/longitude columns are missing from sensor_data.csv."
+            )
+
+
+# -----------------------------
+# Display map and address popup
+# -----------------------------
+if latitude is not None and longitude is not None:
+    st.divider()
+    st.subheader("🗺️ Detected Location")
+
+    st.write(f"**Source:** {location_source}")
+    st.write(f"**Latitude:** {latitude:.6f}")
+    st.write(f"**Longitude:** {longitude:.6f}")
+
+    with st.spinner("Finding the nearby place and address..."):
+        address, address_parts = get_address(latitude, longitude)
+
+    if address:
+        place_name = (
+            address_parts.get("neighbourhood")
+            or address_parts.get("suburb")
+            or address_parts.get("village")
+            or address_parts.get("town")
+            or address_parts.get("city")
+            or address_parts.get("county")
+            or "Detected location"
         )
 
         city = (
-            address.get("city")
-            or address.get("town")
-            or address.get("municipality")
-            or address.get("village")
+            address_parts.get("city")
+            or address_parts.get("town")
+            or address_parts.get("village")
+            or address_parts.get("municipality")
+            or "Not available"
         )
 
-        state = address.get("state")
-
-        country = address.get("country")
-
-        return {
-            "locality": locality,
-            "city": city,
-            "state": state,
-            "country": country,
-            "full_address": location.address
-        }
-
-    except Exception:
-
-        return None
-
-
-# =========================================================
-# IMAGE BASED LOCATION
-# =========================================================
-
-st.subheader("📷 Image-Based Location")
-
-st.write(
-    "Upload an original camera photo. "
-    "The system first checks GPS metadata and then "
-    "converts coordinates into a readable place name."
-)
-
-
-uploaded_image = st.file_uploader(
-    "Upload an image",
-    type=["jpg", "jpeg", "png"]
-)
-
-
-if uploaded_image is not None:
-
-    # -----------------------------------------------------
-    # SHOW IMAGE
-    # -----------------------------------------------------
-
-    st.image(
-        uploaded_image,
-        caption="Uploaded Image",
-        use_container_width=True
-    )
-
-    # -----------------------------------------------------
-    # GET GPS FROM IMAGE
-    # -----------------------------------------------------
-
-    location = get_gps_from_image(
-        uploaded_image
-    )
-
-    if location:
-
-        # =================================================
-        # IMAGE GPS FOUND
-        # =================================================
-
-        image_latitude, image_longitude = location
-
-        location_source = "Image GPS Metadata"
-
-        st.success(
-            "📍 GPS metadata successfully detected!"
-        )
+        state = address_parts.get("state", "Not available")
+        country = address_parts.get("country", "Not available")
 
     else:
+        place_name = "Location name unavailable"
+        address = "Address could not be retrieved. Check your internet connection."
+        city = "Not available"
+        state = "Not available"
+        country = "Not available"
 
-        # =================================================
-        # FALLBACK TO SENSOR DATA
-        # =================================================
+    st.markdown(f"### 📍 {place_name}")
+    st.write(f"**Full address:** {address}")
+    st.write(f"**City/Town:** {city}")
+    st.write(f"**State:** {state}")
+    st.write(f"**Country:** {country}")
 
-        image_latitude = float(
-            data["latitude"].iloc[-1]
-        )
-
-        image_longitude = float(
-            data["longitude"].iloc[-1]
-        )
-
-        location_source = "Sensor Data Fallback"
-
-        st.warning(
-            "⚠️ Image GPS metadata not found."
-        )
-
-        st.info(
-            "📍 Using latest available sensor/GPS "
-            "location as fallback."
-        )
-
-    # -----------------------------------------------------
-    # REVERSE GEOCODING
-    # -----------------------------------------------------
-
-    place = get_place_name(
-        image_latitude,
-        image_longitude
+    location_map = folium.Map(
+        location=[latitude, longitude],
+        zoom_start=17,
+        control_scale=True
     )
 
-    # -----------------------------------------------------
-    # DETECTED LOCATION
-    # -----------------------------------------------------
+    popup_html = f"""
+    <div style="width:260px; font-family:Arial;">
+        <h4>📍 {place_name}</h4>
+        <p><b>Address:</b> {address}</p>
+        <p><b>Latitude:</b> {latitude:.6f}</p>
+        <p><b>Longitude:</b> {longitude:.6f}</p>
+    </div>
+    """
 
-    st.subheader("📍 Detected Location")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-
-        st.metric(
-            "Latitude",
-            f"{image_latitude:.6f}"
+    folium.Marker(
+        location=[latitude, longitude],
+        tooltip=f"📍 {place_name} — tap to view address",
+        popup=folium.Popup(popup_html, max_width=320),
+        icon=folium.Icon(
+            color="red",
+            icon="map-marker",
+            prefix="fa"
         )
+    ).add_to(location_map)
 
-    with col2:
+    folium.Circle(
+        location=[latitude, longitude],
+        radius=40,
+        color="red",
+        fill=True,
+        fill_opacity=0.12
+    ).add_to(location_map)
 
-        st.metric(
-            "Longitude",
-            f"{image_longitude:.6f}"
-        )
-
-    # -----------------------------------------------------
-    # PLACE NAME
-    # -----------------------------------------------------
-
-    if place:
-
-        locality = place.get("locality")
-        city = place.get("city")
-        state = place.get("state")
-        country = place.get("country")
-
-        if locality:
-
-            st.success(
-                f"📍 Place: {locality}"
-            )
-
-        elif city:
-
-            st.success(
-                f"📍 Place: {city}"
-            )
-
-        if city:
-            st.write(f"🏙️ **City:** {city}")
-
-        if state:
-            st.write(f"🗺️ **State:** {state}")
-
-        if country:
-            st.write(f"🌍 **Country:** {country}")
-
-        st.caption(
-            f"📌 Location Source: {location_source}"
-        )
-
-        with st.expander("View full address"):
-
-            st.write(
-                place["full_address"]
-            )
-
-    else:
-
-        st.info(
-            "📍 Coordinates found, but place name "
-            "could not be retrieved."
-        )
-
-    # -----------------------------------------------------
-    # MAP
-    # -----------------------------------------------------
-
-    st.subheader("🗺️ Location Map")
-
-    image_map = pd.DataFrame(
-        {
-            "lat": [image_latitude],
-            "lon": [image_longitude]
-        }
+    st_folium(
+        location_map,
+        width=None,
+        height=500,
+        use_container_width=True,
+        key="navi_dr_location_map"
     )
 
-    st.map(
-        image_map,
-        latitude="lat",
-        longitude="lon",
-        zoom=15
+    st.caption(
+        "Tap the red location marker to open the address popup. "
+        "The circle represents an illustrative 40-metre radius, "
+        "not measured GPS accuracy."
     )
 
+    maps_url = (
+        f"https://www.google.com/maps/search/?api=1"
+        f"&query={latitude},{longitude}"
+    )
 
-# =========================================================
-# SENSOR DATA
-# =========================================================
+    st.link_button("Open location in Google Maps", maps_url)
 
+
+# -----------------------------
+# Sensor data
+# -----------------------------
+st.divider()
 st.subheader("📊 Sensor Data")
 
-st.dataframe(
-    data,
-    use_container_width=True
-)
+if not data.empty:
+    st.dataframe(data, use_container_width=True)
 
+    numeric_columns = data.select_dtypes(
+        include=np.number
+    ).columns.tolist()
 
-# =========================================================
-# CALCULATE HEADING
-# =========================================================
+    if numeric_columns:
+        selected_columns = st.multiselect(
+            "Choose sensor values to plot",
+            options=numeric_columns,
+            default=[
+                col for col in ["acc_x", "acc_y", "acc_z"]
+                if col in numeric_columns
+            ]
+        )
 
-def calculate_heading(mx, my):
+        if selected_columns:
+            st.line_chart(data[selected_columns])
 
-    heading = math.degrees(
-        math.atan2(my, mx)
+    # -----------------------------
+    # Magnetometer heading
+    # -----------------------------
+    if "mag_x" in data.columns and "mag_y" in data.columns:
+        mag_x = pd.to_numeric(data["mag_x"], errors="coerce")
+        mag_y = pd.to_numeric(data["mag_y"], errors="coerce")
+
+        valid_heading = mag_x.notna() & mag_y.notna()
+
+        if valid_heading.any():
+            last_index = valid_heading[valid_heading].index[-1]
+            heading = math.degrees(
+                math.atan2(
+                    mag_y.loc[last_index],
+                    mag_x.loc[last_index]
+                )
+            )
+            heading = (heading + 360) % 360
+
+            st.metric(
+                "Latest raw magnetometer heading",
+                f"{heading:.1f}°"
+            )
+            st.caption(
+                "This is a basic heading estimate, not a calibrated "
+                "compass direction."
+            )
+
+    # -----------------------------
+    # GPS path
+    # -----------------------------
+    st.subheader("🛰️ GPS Track")
+
+    if "latitude" in data.columns and "longitude" in data.columns:
+        track = data.copy()
+
+        track["latitude"] = pd.to_numeric(
+            track["latitude"], errors="coerce"
+        )
+        track["longitude"] = pd.to_numeric(
+            track["longitude"], errors="coerce"
+        )
+
+        track = track.dropna(subset=["latitude", "longitude"])
+
+        track = track[
+            track["latitude"].between(-90, 90)
+            & track["longitude"].between(-180, 180)
+            & (
+                (track["latitude"] != 0)
+                | (track["longitude"] != 0)
+            )
+        ]
+
+        if not track.empty:
+            st.map(
+                track[["latitude", "longitude"]],
+                use_container_width=True
+            )
+        else:
+            st.info("No valid GPS track points are available.")
+    else:
+        st.info("CSV needs latitude and longitude columns.")
+
+    # -----------------------------
+    # GNSS outage demonstration
+    # -----------------------------
+    st.subheader("🚦 GNSS Outage Demonstration")
+
+    st.write(
+        "Select a section of the dataset to demonstrate a GNSS blackout. "
+        "This view masks GPS coordinates during the selected interval; "
+        "it does not calculate a validated dead-reckoned trajectory."
     )
 
-    if heading < 0:
-        heading += 360
+    if len(data) >= 2:
+        max_start = len(data) - 1
 
-    return heading
+        blackout_start = st.slider(
+            "Blackout start row",
+            min_value=0,
+            max_value=max_start - 1,
+            value=0
+        )
 
+        blackout_end = st.slider(
+            "Blackout end row",
+            min_value=blackout_start + 1,
+            max_value=max_start,
+            value=min(10, max_start)
+        )
 
-data["heading"] = data.apply(
-    lambda row: calculate_heading(
-        row["mag_x"],
-        row["mag_y"]
-    ),
-    axis=1
-)
+        st.write(
+            f"GNSS unavailable in rows {blackout_start} "
+            f"through {blackout_end}."
+        )
 
+        if "latitude" in data.columns and "longitude" in data.columns:
+            demo = data.copy()
+            demo["latitude"] = pd.to_numeric(
+                demo["latitude"], errors="coerce"
+            )
+            demo["longitude"] = pd.to_numeric(
+                demo["longitude"], errors="coerce"
+            )
 
-# =========================================================
-# CURRENT NAVIGATION STATUS
-# =========================================================
+            demo.loc[
+                blackout_start:blackout_end,
+                ["latitude", "longitude"]
+            ] = np.nan
 
-latest = data.iloc[-1]
+            st.line_chart(
+                demo[["latitude", "longitude"]]
+            )
 
-st.subheader("📡 Current Navigation Status")
-
-col1, col2, col3, col4 = st.columns(4)
-
-with col1:
-
-    st.metric(
-        "Latitude",
-        f"{latest['latitude']:.6f}"
+            st.caption(
+                "This is a GNSS data-masking demonstration only. "
+                "IMU-based dead reckoning and drift correction require "
+                "a separate validated algorithm."
+            )
+else:
+    st.info(
+        "Upload sensor_data.csv to display sensor readings, GPS track, "
+        "and the outage demonstration."
     )
 
-with col2:
-
-    st.metric(
-        "Longitude",
-        f"{latest['longitude']:.6f}"
-    )
-
-with col3:
-
-    st.metric(
-        "Speed",
-        f"{latest['speed']:.2f} m/s"
-    )
-
-with col4:
-
-    st.metric(
-        "Heading",
-        f"{latest['heading']:.1f}°"
-    )
-
-
-# =========================================================
-# IMU SENSOR INFORMATION
-# =========================================================
-
-st.subheader("📱 IMU Sensor Information")
-
-col1, col2, col3 = st.columns(3)
-
-
-with col1:
-
-    st.write("### 🚶 Accelerometer")
-
-    st.write("X:", latest["acc_x"])
-    st.write("Y:", latest["acc_y"])
-    st.write("Z:", latest["acc_z"])
-
-
-with col2:
-
-    st.write("### 🔄 Gyroscope")
-
-    st.write("X:", latest["gyro_x"])
-    st.write("Y:", latest["gyro_y"])
-    st.write("Z:", latest["gyro_z"])
-
-
-with col3:
-
-    st.write("### 🧭 Magnetometer")
-
-    st.write("X:", latest["mag_x"])
-    st.write("Y:", latest["mag_y"])
-    st.write("Z:", latest["mag_z"])
-
-
-# =========================================================
-# GPS NAVIGATION PATH
-# =========================================================
-
-st.subheader("🗺️ GPS Navigation Path")
-
-fig = go.Figure()
-
-
-fig.add_trace(
-    go.Scattermap(
-        lat=data["latitude"],
-        lon=data["longitude"],
-        mode="lines+markers",
-        name="GPS Path"
-    )
-)
-
-
-fig.update_layout(
-
-    map=dict(
-        style="open-street-map",
-
-        center=dict(
-            lat=data["latitude"].mean(),
-            lon=data["longitude"].mean()
-        ),
-
-        zoom=15
-    ),
-
-    height=500,
-
-    margin=dict(
-        l=0,
-        r=0,
-        t=0,
-        b=0
-    )
-)
-
-
-st.plotly_chart(
-    fig,
-    use_container_width=True
-)
-
-
-# =========================================================
-# GPS OUTAGE SIMULATION
-# =========================================================
-
-st.subheader("🚨 GPS Outage Simulation")
-
-st.info(
-    "During GPS outage, the system can use "
-    "accelerometer, gyroscope, magnetometer, "
-    "speed and previous position to estimate movement."
-)
-
-
-# =========================================================
-# FOOTER
-# =========================================================
-
-st.markdown("---")
-
-st.caption(
-    "SIH Prototype | Python | Streamlit | Pandas | Plotly | GeoPy"
-)
+st.divider()
+st.caption("NAVI-DR | INETIA X | SIH26168")
