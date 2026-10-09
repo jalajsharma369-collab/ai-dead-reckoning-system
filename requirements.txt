@@ -4,4 +4,6 @@ plotly
 numpy
 scikit-learn
 Pillow
+folium
+streamlit-folium
 geopy
