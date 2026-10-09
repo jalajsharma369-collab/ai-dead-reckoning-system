@@ -6,13 +6,11 @@ import folium
 from PIL import Image, ExifTags
 from streamlit_folium import st_folium
 from geopy.geocoders import Nominatim
-from geopy.exc import GeocoderServiceError
 from io import BytesIO
-import math
 
-# --------------------------------------------------
-# PAGE SETTINGS
-# --------------------------------------------------
+# ==================================================
+# PAGE CONFIGURATION
+# ==================================================
 st.set_page_config(
     page_title="NAVI-DR | Intelligent Dead Reckoning",
     page_icon="🧭",
@@ -22,82 +20,85 @@ st.set_page_config(
 st.title("🧭 NAVI-DR")
 st.subheader("AI-ML Based Intelligent Dead Reckoning System")
 st.write(
-    "Upload a photo to check whether it contains GPS metadata. "
-    "Sensor data and photo location are handled separately."
+    "AI-ML based Intelligent Dead Reckoning system "
+    "for seamless navigation."
 )
 
-# --------------------------------------------------
-# GPS / EXIF HELPERS
-# --------------------------------------------------
-def convert_coordinate(value):
-    """Convert EXIF degrees/minutes/seconds to decimal degrees."""
-    try:
-        parts = list(value)
+# ==================================================
+# PHOTO GPS FUNCTIONS
+# ==================================================
+def rational_to_float(value):
+    """Convert an EXIF rational value into a float."""
+    if hasattr(value, "numerator") and hasattr(value, "denominator"):
+        if value.denominator == 0:
+            raise ValueError("Invalid rational number")
+        return float(value.numerator) / float(value.denominator)
+    return float(value)
 
-        def rational_to_float(item):
-            if hasattr(item, "numerator") and hasattr(item, "denominator"):
-                if item.denominator == 0:
-                    raise ValueError("Invalid EXIF rational value")
-                return float(item.numerator) / float(item.denominator)
-            return float(item)
 
-        degrees = rational_to_float(parts[0])
-        minutes = rational_to_float(parts[1])
-        seconds = rational_to_float(parts[2])
-
-        return degrees + minutes / 60 + seconds / 3600
-    except (TypeError, ValueError, IndexError, ZeroDivisionError):
+def dms_to_decimal(value):
+    """Convert GPS degrees, minutes and seconds to decimal."""
+    if value is None or len(value) < 3:
         return None
+
+    degrees = rational_to_float(value[0])
+    minutes = rational_to_float(value[1])
+    seconds = rational_to_float(value[2])
+
+    return degrees + minutes / 60.0 + seconds / 3600.0
 
 
 def get_image_gps(uploaded_file):
     """
-    Return (latitude, longitude) only when valid GPS coordinates
-    exist in the uploaded image's EXIF metadata.
-    Otherwise return None.
+    Return (latitude, longitude) if the image contains readable
+    EXIF GPS coordinates. Otherwise return None.
     """
     try:
-        image_bytes = uploaded_file.getvalue()
-
-        with Image.open(BytesIO(image_bytes)) as image:
+        with Image.open(BytesIO(uploaded_file.getvalue())) as image:
             exif = image.getexif()
 
             if not exif:
                 return None
 
-            # Modern Pillow method
             gps_info = {}
+
+            # Preferred method in current Pillow versions
             try:
                 gps_info = exif.get_ifd(ExifTags.IFD.GPSInfo)
             except (AttributeError, KeyError, TypeError, ValueError):
-                pass
+                gps_info = {}
 
-            # Compatibility fallback for images/Pillow versions
+            # Compatibility fallback for some older image metadata
             if not gps_info:
                 raw_gps = exif.get(34853)
+
                 if isinstance(raw_gps, dict):
                     gps_info = raw_gps
 
             # Convert numeric EXIF tag IDs to readable names
-            named_gps = {}
+            readable = {}
+
             for tag_id, value in gps_info.items():
-                tag_name = ExifTags.GPSTAGS.get(tag_id, tag_id)
-                named_gps[tag_name] = value
+                name = ExifTags.GPSTAGS.get(tag_id, tag_id)
+                readable[name] = value
 
-            # Some files already provide readable GPS tag names
-            if "GPSLatitude" not in named_gps:
-                named_gps.update(gps_info)
+            # Accept already-readable GPS names too
+            readable.update({
+                key: value
+                for key, value in gps_info.items()
+                if isinstance(key, str)
+            })
 
-            lat_value = named_gps.get("GPSLatitude")
-            lon_value = named_gps.get("GPSLongitude")
-            lat_ref = named_gps.get("GPSLatitudeRef")
-            lon_ref = named_gps.get("GPSLongitudeRef")
+            lat_value = readable.get("GPSLatitude")
+            lon_value = readable.get("GPSLongitude")
+            lat_ref = readable.get("GPSLatitudeRef")
+            lon_ref = readable.get("GPSLongitudeRef")
 
             if lat_value is None or lon_value is None:
                 return None
 
-            latitude = convert_coordinate(lat_value)
-            longitude = convert_coordinate(lon_value)
+            latitude = dms_to_decimal(lat_value)
+            longitude = dms_to_decimal(lon_value)
 
             if latitude is None or longitude is None:
                 return None
@@ -120,10 +121,11 @@ def get_image_gps(uploaded_file):
         return None
 
 
-# --------------------------------------------------
-# PHOTO UPLOAD AND LOCATION
-# --------------------------------------------------
-st.header("📷 Photo Location Detection")
+# ==================================================
+# PHOTO UPLOAD
+# ==================================================
+st.divider()
+st.header("📷 Photo GPS Location")
 
 uploaded_file = st.file_uploader(
     "Upload the original photo",
@@ -132,9 +134,7 @@ uploaded_file = st.file_uploader(
 
 if uploaded_file is not None:
     try:
-        image_bytes = uploaded_file.getvalue()
-
-        with Image.open(BytesIO(image_bytes)) as image:
+        with Image.open(BytesIO(uploaded_file.getvalue())) as image:
             st.image(
                 image.copy(),
                 caption="Uploaded photo",
@@ -145,68 +145,63 @@ if uploaded_file is not None:
 
         if gps_result is None:
             st.warning(
-                "GPS metadata not found in this photo. "
-                "The exact photo location cannot be determined from "
-                "this image's available GPS metadata."
-            )
-
-            st.markdown(
-                """
-                **Try these steps:**
-                1. On your phone, turn on Location.
-                2. Open Camera settings and enable location tagging.
-                3. Take a new photo using the phone's Camera app.
-                4. Upload the original JPG file directly, not a
-                   screenshot or a copy downloaded from a messaging app.
-                """
+                "GPS metadata not found. This image does not contain "
+                "readable GPS coordinates."
             )
 
             st.info(
-                "The app will not substitute sensor_data.csv coordinates "
-                "because those coordinates may be from a different place."
+                "For a new photo, enable Location on your phone and "
+                "turn on location tagging in the Camera settings. "
+                "Take a new photo and upload the original file."
+            )
+
+            st.caption(
+                "The app will not guess the photo location or use "
+                "sensor_data.csv as a replacement."
             )
 
         else:
             latitude, longitude = gps_result
 
-            st.success("GPS coordinates found in the photo metadata.")
+            st.success("GPS coordinates found in photo metadata.")
 
             col1, col2 = st.columns(2)
             col1.metric("Latitude", f"{latitude:.6f}")
             col2.metric("Longitude", f"{longitude:.6f}")
 
-            st.markdown(
-                f"[Open coordinates in Google Maps]"
-                f"(https://www.google.com/maps?q={latitude},{longitude})"
+            maps_url = (
+                f"https://www.google.com/maps"
+                f"?q={latitude},{longitude}"
             )
 
-            # Reverse geocoding: convert coordinates to an address
-            address = None
+            st.markdown(
+                f"[Open photo coordinates in Google Maps]({maps_url})"
+            )
+
+            # Reverse geocoding is optional
             try:
                 geolocator = Nominatim(
                     user_agent="navi_dr_student_project"
                 )
+
                 location = geolocator.reverse(
                     (latitude, longitude),
                     exactly_one=True,
                     timeout=10
                 )
-                if location:
-                    address = location.address
-            except (GeocoderServiceError, TimeoutError, OSError):
-                address = None
-            except Exception:
-                address = None
 
-            if address:
-                st.write("**Approximate mapped address:**", address)
-            else:
+                if location:
+                    st.write("**Mapped address:**", location.address)
+                else:
+                    st.caption("No address was returned for these coordinates.")
+
+            except Exception:
                 st.caption(
-                    "Address lookup was unavailable. Coordinates are "
-                    "still shown on the map."
+                    "Address lookup is unavailable, but the GPS "
+                    "coordinates can still be displayed."
                 )
 
-            # Map using only coordinates from the uploaded photo
+            # Photo GPS map
             photo_map = folium.Map(
                 location=[latitude, longitude],
                 zoom_start=17,
@@ -214,33 +209,41 @@ if uploaded_file is not None:
             )
 
             folium.Marker(
-                [latitude, longitude],
-                tooltip="Photo GPS coordinates",
+                location=[latitude, longitude],
+                tooltip="Photo GPS location",
                 popup=(
                     f"Latitude: {latitude:.6f}<br>"
                     f"Longitude: {longitude:.6f}"
                 ),
-                icon=folium.Icon(color="red", icon="camera")
+                icon=folium.Icon(
+                    color="red",
+                    icon="camera",
+                    prefix="fa"
+                )
             ).add_to(photo_map)
 
-            st.subheader("📍 Photo GPS Map")
+            st.subheader("📍 Photo Location Map")
+
             st_folium(
                 photo_map,
-                width=None,
                 height=450,
-                key="photo_location_map"
+                use_container_width=True,
+                key="photo_map"
             )
 
-except Exception as error:
-    st.error("Could not read this image. Please try an original JPG photo.")
-    st.caption(f"Technical detail: {error}")
+    except Exception as error:
+        st.error(
+            "Unable to open this image. Please upload a valid JPG or TIFF."
+        )
+        st.caption(f"Details: {error}")
 
 
-# --------------------------------------------------
+# ==================================================
 # SENSOR DATA
-# --------------------------------------------------
+# ==================================================
 st.divider()
 st.header("📊 Sensor Data Analysis")
+
 
 @st.cache_data
 def load_sensor_data():
@@ -250,12 +253,9 @@ def load_sensor_data():
 try:
     data = load_sensor_data()
 
-    st.success("sensor_data.csv loaded successfully.")
+    st.success("Sensor data loaded successfully.")
 
-    st.subheader("Sensor Data Preview")
-    st.dataframe(data.head(20), use_container_width=True)
-
-    # Convert known numeric sensor columns safely
+    # Convert expected numeric columns
     numeric_columns = [
         "timestamp",
         "acc_x", "acc_y", "acc_z",
@@ -267,132 +267,179 @@ try:
     for column in numeric_columns:
         if column in data.columns:
             data[column] = pd.to_numeric(
-                data[column], errors="coerce"
+                data[column],
+                errors="coerce"
             )
 
-    # Acceleration chart
-    acceleration_columns = [
-        c for c in ["acc_x", "acc_y", "acc_z"] if c in data.columns
+    st.subheader("Sensor Data Preview")
+    st.dataframe(data.head(20), use_container_width=True)
+
+    # Acceleration
+    acc_columns = [
+        column
+        for column in ["acc_x", "acc_y", "acc_z"]
+        if column in data.columns
     ]
 
-    if acceleration_columns:
+    if acc_columns:
         st.subheader("Acceleration")
-        st.line_chart(data[acceleration_columns])
+        st.line_chart(data[acc_columns])
 
-    # Gyroscope chart
+    # Gyroscope
     gyro_columns = [
-        c for c in ["gyro_x", "gyro_y", "gyro_z"] if c in data.columns
+        column
+        for column in ["gyro_x", "gyro_y", "gyro_z"]
+        if column in data.columns
     ]
 
     if gyro_columns:
         st.subheader("Gyroscope")
         st.line_chart(data[gyro_columns])
 
-    # Magnetometer chart
-    magnetometer_columns = [
-        c for c in ["mag_x", "mag_y", "mag_z"] if c in data.columns
+    # Magnetometer
+    mag_columns = [
+        column
+        for column in ["mag_x", "mag_y", "mag_z"]
+        if column in data.columns
     ]
 
-    if magnetometer_columns:
+    if mag_columns:
         st.subheader("Magnetometer")
-        st.line_chart(data[magnetometer_columns])
+        st.line_chart(data[mag_columns])
 
-    # Independent sensor GPS track map
-    # This map is NOT used as the photo's location.
+    # ==================================================
+    # SENSOR GPS TRACK - NOT THE PHOTO LOCATION
+    # ==================================================
+    st.subheader("🛰️ Sensor Dataset GPS Track")
+
     if {"latitude", "longitude"}.issubset(data.columns):
-        track = data.dropna(subset=["latitude", "longitude"]).copy()
+        track = data.dropna(
+            subset=["latitude", "longitude"]
+        ).copy()
 
         track = track[
             track["latitude"].between(-90, 90)
             & track["longitude"].between(-180, 180)
         ]
 
-        st.subheader("🛰️ Sensor Dataset GPS Track")
-
         if not track.empty:
-            track_points = track[["latitude", "longitude"]].values.tolist()
+            points = track[
+                ["latitude", "longitude"]
+            ].values.tolist()
 
             track_map = folium.Map(
-                location=track_points[0],
+                location=points[0],
                 zoom_start=14,
                 control_scale=True
             )
 
-            folium.PolyLine(
-                track_points,
-                color="blue",
-                weight=4,
-                tooltip="Sensor dataset GPS track"
-            ).add_to(track_map)
+            if len(points) > 1:
+                folium.PolyLine(
+                    points,
+                    color="blue",
+                    weight=4,
+                    tooltip="Sensor GPS track"
+                ).add_to(track_map)
 
             folium.Marker(
-                track_points[0],
+                points[0],
                 tooltip="Track start",
                 icon=folium.Icon(color="green")
             ).add_to(track_map)
 
             folium.Marker(
-                track_points[-1],
+                points[-1],
                 tooltip="Track end",
                 icon=folium.Icon(color="blue")
             ).add_to(track_map)
 
             st_folium(
                 track_map,
-                width=None,
                 height=400,
+                use_container_width=True,
                 key="sensor_track_map"
             )
-        else:
-            st.info(
-                "No valid latitude/longitude coordinates found "
-                "in sensor_data.csv."
+
+            st.caption(
+                "This map shows the sensor CSV coordinates, "
+                "not the uploaded photo's location."
             )
 
-    # Simple GNSS blackout demonstration
-    if "latitude" in data.columns and "longitude" in data.columns:
-        st.subheader("GNSS Availability Demonstration")
+        else:
+            st.info(
+                "No valid GPS coordinates found in sensor_data.csv."
+            )
 
-        blackout_fraction = st.slider(
-            "Percentage of rows to mask as GNSS blackout",
+    else:
+        st.info(
+            "The sensor CSV needs latitude and longitude columns "
+            "to display a GPS track."
+        )
+
+    # ==================================================
+    # GNSS BLACKOUT DEMONSTRATION
+    # ==================================================
+    st.divider()
+    st.subheader("GNSS Blackout Demonstration")
+
+    if {"latitude", "longitude"}.issubset(data.columns):
+        blackout_percent = st.slider(
+            "Percentage of initial rows to mask",
             min_value=5,
             max_value=80,
             value=30,
             step=5
         )
 
-        demo = data.copy()
-        number_to_mask = int(len(demo) * blackout_fraction / 100)
-
-        if number_to_mask > 0:
-            demo.loc[
-                demo.index[:number_to_mask],
-                ["latitude", "longitude"]
-            ] = np.nan
-
-        st.caption(
-            "Illustration only: this masks some GNSS rows. It does not "
-            "calculate or validate dead-reckoning accuracy."
+        demo_data = data.copy()
+        rows_to_mask = int(
+            len(demo_data) * blackout_percent / 100
         )
 
-        st.dataframe(demo.head(20), use_container_width=True)
+        if rows_to_mask > 0:
+            demo_data.iloc[
+                :rows_to_mask,
+                demo_data.columns.get_indexer(
+                    ["latitude", "longitude"]
+                )
+            ] = np.nan
+
+        st.dataframe(
+            demo_data.head(20),
+            use_container_width=True
+        )
+
+        st.caption(
+            "Demonstration only: GNSS coordinates are masked in selected "
+            "rows. This does not itself calculate dead-reckoning positions "
+            "or verify the project's accuracy target."
+        )
+
+    else:
+        st.info(
+            "GNSS blackout demonstration requires latitude and "
+            "longitude columns in sensor_data.csv."
+        )
 
 except FileNotFoundError:
     st.error(
-        "sensor_data.csv was not found. Put it in the same project "
-        "folder as app.py."
+        "sensor_data.csv not found. Place it in the same folder as app.py."
     )
+
+except pd.errors.EmptyDataError:
+    st.error("sensor_data.csv is empty.")
+
 except Exception as error:
-    st.error("Could not load or process sensor_data.csv.")
-    st.caption(f"Technical detail: {error}")
+    st.error("An error occurred while processing sensor data.")
+    st.caption(f"Details: {error}")
 
 
-# --------------------------------------------------
+# ==================================================
 # FOOTER
-# --------------------------------------------------
+# ==================================================
 st.divider()
+
 st.caption(
-    "NAVI-DR | Student prototype. Photo coordinates are shown only "
-    "when readable GPS metadata is available. Sensor track coordinates "
-    "are displayed separately."
+    "NAVI-DR | Student prototype | Photo GPS metadata and sensor "
+    "dataset coordinates are handled separately."
 )
